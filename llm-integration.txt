@@ -1,0 +1,391 @@
+#!/usr/bin/env python
+"""
+Example of integrating the MCP Server with a language model.
+This example shows how to use the MCP server as a tool provider for an LLM.
+"""
+
+import os
+import json
+import requests
+import argparse
+from dotenv import load_dotenv
+from typing import Dict, Any, List, Optional
+
+# Load environment variables
+load_dotenv()
+
+# Configure API keys
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:5000")
+
+class MCPToolProvider:
+    """
+    Tool provider for language models using the MCP server.
+    """
+    
+    def __init__(self, base_url: str):
+        """
+        Initialize the MCP tool provider.
+        
+        Args:
+            base_url: The base URL of the MCP server
+        """
+        self.base_url = base_url
+        self.gateway_url = f"{base_url}/mcp/gateway"
+        self.manifest_url = f"{base_url}/mcp/manifest"
+        self.manifest = None
+        self.tools_schema = []
+    
+    def load_tools(self) -> List[Dict[str, Any]]:
+        """
+        Load tool definitions from the MCP server manifest and convert to OpenAI tools format.
+        
+        Returns:
+            A list of tools in OpenAI format
+        """
+        response = requests.get(self.manifest_url)
+        response.raise_for_status()
+        self.manifest = response.json()
+        
+        tools_schema = []
+        
+        for tool_name, tool_info in self.manifest["tools"].items():
+            for action_name, action_info in tool_info["actions"].items():
+                # Create OpenAI function calling format
+                function_def = {
+                    "type": "function",
+                    "function": {
+                        "name": f"{tool_name}_{action_name}",
+                        "description": action_info["description"],
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    }
+                }
+                
+                # Add parameters
+                for param_name, param_info in action_info.get("parameters", {}).items():
+                    function_def["function"]["parameters"]["properties"][param_name] = {
+                        "type": param_info.get("type", "string"),
+                        "description": param_info.get("description", "")
+                    }
+                    
+                    # Add to required list if no default value
+                    if "default" not in param_info:
+                        function_def["function"]["parameters"]["required"].append(param_name)
+                
+                tools_schema.append(function_def)
+        
+        self.tools_schema = tools_schema
+        return tools_schema
+    
+    def execute_tool(self, function_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Execute a tool function via the MCP gateway.
+        
+        Args:
+            function_name: The name of the function to execute (in format "tool_action")
+            arguments: The arguments for the function
+        
+        Returns:
+            The result of the function execution
+        """
+        # Split function name into tool and action
+        parts = function_name.split("_", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid function name format: {function_name}")
+        
+        tool, action = parts
+        
+        # Call the MCP gateway
+        payload = {
+            "tool": tool,
+            "action": action,
+            "parameters": arguments
+        }
+        
+        response = requests.post(self.gateway_url, json=payload)
+        response.raise_for_status()
+        result = response.json()
+        
+        if result["status"] != "success":
+            raise Exception(f"Tool execution failed: {result.get('error', 'Unknown error')}")
+        
+        return result["result"]
+
+
+class OpenAIClient:
+    """
+    OpenAI API client with MCP tool integration.
+    """
+    
+    def __init__(self, api_key: str, model: str = "gpt-4-0125-preview"):
+        """
+        Initialize the OpenAI client.
+        
+        Args:
+            api_key: The OpenAI API key
+            model: The model to use
+        """
+        self.api_key = api_key
+        self.model = model
+        self.headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        self.endpoint = "https://api.openai.com/v1/chat/completions"
+    
+    def chat(self, 
+             messages: List[Dict[str, Any]], 
+             tools: Optional[List[Dict[str, Any]]] = None,
+             tool_provider: Optional[MCPToolProvider] = None) -> Dict[str, Any]:
+        """
+        Chat with the OpenAI model using tools.
+        
+        Args:
+            messages: The conversation messages
+            tools: The tools to make available to the model
+            tool_provider: The tool provider for executing tool calls
+        
+        Returns:
+            The model's response
+        """
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.7,
+        }
+        
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        
+        # Make the initial API call
+        response = requests.post(self.endpoint, headers=self.headers, json=payload)
+        response.raise_for_status()
+        result = response.json()
+        
+        # Handle tool calls if present
+        while tool_provider and result["choices"][0]["message"].get("tool_calls"):
+            tool_message = result["choices"][0]["message"]
+            messages.append(tool_message)
+            
+            # Process each tool call
+            for tool_call in tool_message["tool_calls"]:
+                function_name = tool_call["function"]["name"]
+                arguments = json.loads(tool_call["function"]["arguments"])
+                
+                try:
+                    # Execute the tool
+                    function_response = tool_provider.execute_tool(function_name, arguments)
+                    
+                    # Add the tool response to messages
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "name": function_name,
+                        "content": json.dumps(function_response)
+                    })
+                except Exception as e:
+                    # Handle tool execution errors
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "name": function_name,
+                        "content": json.dumps({"error": str(e)})
+                    })
+            
+            # Make another API call with the tool responses
+            payload["messages"] = messages
+            response = requests.post(self.endpoint, headers=self.headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+        
+        return result
+
+
+class AnthropicClient:
+    """
+    Anthropic API client with MCP tool integration.
+    """
+    
+    def __init__(self, api_key: str, model: str = "claude-3-opus-20240229"):
+        """
+        Initialize the Anthropic client.
+        
+        Args:
+            api_key: The Anthropic API key
+            model: The model to use
+        """
+        self.api_key = api_key
+        self.model = model
+        self.headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": api_key,
+            "anthropic-version": "2023-06-01"
+        }
+        self.endpoint = "https://api.anthropic.com/v1/messages"
+    
+    def chat(self, 
+             messages: List[Dict[str, Any]], 
+             tools: Optional[List[Dict[str, Any]]] = None,
+             tool_provider: Optional[MCPToolProvider] = None) -> Dict[str, Any]:
+        """
+        Chat with the Anthropic model using tools.
+        
+        Args:
+            messages: The conversation messages
+            tools: The tools to make available to the model
+            tool_provider: The tool provider for executing tool calls
+        
+        Returns:
+            The model's response
+        """
+        # Convert OpenAI message format to Anthropic format
+        anthropic_messages = []
+        for msg in messages:
+            if msg["role"] == "user":
+                anthropic_messages.append({"role": "user", "content": msg["content"]})
+            elif msg["role"] == "assistant":
+                anthropic_messages.append({"role": "assistant", "content": msg["content"]})
+            elif msg["role"] == "system":
+                # System messages are handled differently in Anthropic API
+                system_content = msg["content"]
+        
+        payload = {
+            "model": self.model,
+            "messages": anthropic_messages,
+            "temperature": 0.7,
+            "system": system_content if "system_content" in locals() else "",
+            "max_tokens": 1024
+        }
+        
+        if tools:
+            # Convert OpenAI tools format to Anthropic tools format
+            anthropic_tools = []
+            for tool in tools:
+                if tool["type"] == "function":
+                    anthropic_tools.append({
+                        "name": tool["function"]["name"],
+                        "description": tool["function"]["description"],
+                        "input_schema": tool["function"]["parameters"]
+                    })
+            
+            payload["tools"] = anthropic_tools
+        
+        # Make the initial API call
+        response = requests.post(self.endpoint, headers=self.headers, json=payload)
+        response.raise_for_status()
+        result = response.json()
+        
+        # Handle tool calls if present
+        # Note: This is simplified and would need to be expanded for actual Anthropic tool use
+        # as the formats between OpenAI and Anthropic differ
+        
+        return result
+
+
+def run_github_example():
+    """
+    Run an example of GitHub tool integration with an LLM.
+    """
+    # Initialize the MCP tool provider
+    tool_provider = MCPToolProvider(MCP_SERVER_URL)
+    tools = tool_provider.load_tools()
+    
+    # Filter to just GitHub tools for this example
+    github_tools = [tool for tool in tools if tool["function"]["name"].startswith("github_")]
+    
+    # Initialize the OpenAI client
+    openai_client = OpenAIClient(OPENAI_API_KEY)
+    
+    # Set up the conversation
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant that can use GitHub tools to retrieve information."},
+        {"role": "user", "content": "What repositories does the user 'octocat' have on GitHub?"}
+    ]
+    
+    # Chat with the model using GitHub tools
+    print("Sending query to the language model with GitHub tools...")
+    result = openai_client.chat(messages, github_tools, tool_provider)
+    
+    # Print the result
+    assistant_message = result["choices"][0]["message"]
+    print("\nAssistant response:")
+    print(assistant_message["content"])
+
+
+def run_maps_memory_example():
+    """
+    Run an example combining Google Maps and Memory tools with an LLM.
+    """
+    # Initialize the MCP tool provider
+    tool_provider = MCPToolProvider(MCP_SERVER_URL)
+    tools = tool_provider.load_tools()
+    
+    # Filter to just Google Maps and Memory tools for this example
+    selected_tools = [
+        tool for tool in tools 
+        if tool["function"]["name"].startswith("gmaps_") or tool["function"]["name"].startswith("memory_")
+    ]
+    
+    # Initialize the OpenAI client
+    openai_client = OpenAIClient(OPENAI_API_KEY)
+    
+    # Set up the conversation
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant that can look up locations and store information in memory."},
+        {"role": "user", "content": "Find the coordinates for the Empire State Building, then save that information in memory with the key 'empire_state_building'."}
+    ]
+    
+    # Chat with the model using the selected tools
+    print("Sending query to the language model with Google Maps and Memory tools...")
+    result = openai_client.chat(messages, selected_tools, tool_provider)
+    
+    # Print the result
+    assistant_message = result["choices"][0]["message"]
+    print("\nAssistant response:")
+    print(assistant_message["content"])
+    
+    # Continue the conversation
+    messages.append(assistant_message)
+    messages.append({"role": "user", "content": "Now retrieve the information you stored about the Empire State Building and use Google Maps to find a nearby coffee shop."})
+    
+    # Chat with the model again
+    print("\nSending follow-up query...")
+    result = openai_client.chat(messages, selected_tools, tool_provider)
+    
+    # Print the result
+    assistant_message = result["choices"][0]["message"]
+    print("\nAssistant response:")
+    print(assistant_message["content"])
+
+
+def main():
+    """Run the example integrations"""
+    parser = argparse.ArgumentParser(description="MCP Integration with LLMs")
+    parser.add_argument("--example", choices=["github", "maps_memory"], default="github",
+                        help="Example to run (default: github)")
+    args = parser.parse_args()
+    
+    if not OPENAI_API_KEY:
+        print("Error: OPENAI_API_KEY environment variable is not set")
+        return
+    
+    try:
+        if args.example == "github":
+            run_github_example()
+        elif args.example == "maps_memory":
+            run_maps_memory_example()
+    
+    except requests.exceptions.RequestException as e:
+        print(f"Error connecting to server: {str(e)}")
+    except Exception as e:
+        print(f"Error: {str(e)}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,45 @@
+version: '3'
+
+services:
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-server
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data
+      - ./node_scripts:/app/node_scripts
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional database service for Memory tool
+  # Uncomment to use PostgreSQL instead of SQLite
+  #
+  # db:
+  #   image: postgres:13-alpine
+  #   container_name: mcp-db
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: mcp
+  #     POSTGRES_PASSWORD: mcppassword
+  #     POSTGRES_DB: mcp
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U mcp"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+# Uncomment if using PostgreSQL
+# volumes:
+#   postgres-data:
