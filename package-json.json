@@ -1,0 +1,22 @@
+{
+  "name": "mcp-server",
+  "version": "1.0.0",
+  "description": "Model Context Protocol server with tools for GitHub, GitLab, Google Maps, Memory, and Puppeteer",
+  "main": "index.js",
+  "scripts": {
+    "start": "python app.py",
+    "install-node-deps": "npm install"
+  },
+  "keywords": [
+    "mcp",
+    "ai",
+    "tools",
+    "puppeteer"
+  ],
+  "dependencies": {
+    "puppeteer": "^13.0.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

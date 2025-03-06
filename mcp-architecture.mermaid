@@ -1,0 +1,26 @@
+graph TB
+    Client[Client Applications] --> Gateway[MCP Gateway]
+    Gateway --> Router[MCP Router]
+    
+    Router --> GitHubTool[GitHub Tool]
+    Router --> GitLabTool[GitLab Tool]
+    Router --> GoogleMapsTool[Google Maps Tool]
+    Router --> MemoryTool[Memory Tool]
+    Router --> PuppeteerTool[Puppeteer Tool]
+    
+    GitHubTool --> GitHubAPI[GitHub API]
+    GitLabTool --> GitLabAPI[GitLab API]
+    GoogleMapsTool --> GoogleMapsAPI[Google Maps API]
+    PuppeteerTool --> WebSites[Web Sites]
+    MemoryTool --> DataStore[Data Store]
+    
+    subgraph "MCP Server"
+        Gateway
+        Router
+        GitHubTool
+        GitLabTool
+        GoogleMapsTool
+        MemoryTool
+        PuppeteerTool
+        DataStore
+    end
