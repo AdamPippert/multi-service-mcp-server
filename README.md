@@ -1,3 +1,8 @@
+** NOTE: This project is no longer being maintained, as issues with model memory for smaller models means my preferred method for MCP servers is as individual containerized server providers rather than a monolithic routing provider.  Code is being kept up in case others still want to try to go down this route.
+
+
+
+
 # Model Context Protocol (MCP) Server
 
 A modular server that implements the [Model Context Protocol](https://modelcontextprotocol.io/) standard, providing tools for GitHub, GitLab, Google Maps, Memory storage, and Puppeteer web automation.
