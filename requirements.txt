@@ -6,3 +6,9 @@ python-dotenv==1.0.0
 sqlalchemy==1.4.26
 pyjwt==2.3.0
 polyline==1.4.0
+
+# Tiered Memory System Dependencies
+numpy>=1.21.0  # For vector similarity calculations
+redis>=4.0.0  # For T1 hot cache - Valkey compatible (Profile C/E)
+boto3>=1.26.0  # For S3/MinIO storage (Profile C/E)
+psycopg2-binary>=2.9.0  # For PostgreSQL (Profile C/E)
