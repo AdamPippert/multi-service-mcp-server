@@ -1,0 +1,14 @@
+# Ignore database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Ignore T3 cold storage objects
+t3/
+
+# Ignore audit logs (sensitive)
+audit/
+
+# Keep directory structure
+!.gitignore
+!.gitkeep
