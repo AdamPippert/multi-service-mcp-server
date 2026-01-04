@@ -10,6 +10,13 @@
 # │   ├── gmaps_tool.py
 # │   ├── memory_tool.py
 # │   └── puppeteer_tool.py
+# ├── tiered_memory/
+# │   ├── __init__.py
+# │   ├── models.py
+# │   ├── tiers.py
+# │   ├── engine.py
+# │   ├── config.py
+# │   └── mcp_interface.py
 # ├── static/
 # └── templates/
 
@@ -24,6 +31,7 @@ from tools.gitlab_tool import gitlab_routes
 from tools.gmaps_tool import gmaps_routes
 from tools.memory_tool import memory_routes
 from tools.puppeteer_tool import puppeteer_routes
+from tiered_memory.mcp_interface import tiered_memory_routes
 
 app = Flask(__name__)
 CORS(app)
@@ -35,6 +43,9 @@ app.register_blueprint(gitlab_routes, url_prefix='/tool/gitlab')
 app.register_blueprint(gmaps_routes, url_prefix='/tool/gmaps')
 app.register_blueprint(memory_routes, url_prefix='/tool/memory')
 app.register_blueprint(puppeteer_routes, url_prefix='/tool/puppeteer')
+
+# Register tiered memory routes
+app.register_blueprint(tiered_memory_routes, url_prefix='/tool/tiered_memory')
 
 # MCP Gateway endpoint
 @app.route('/mcp/gateway', methods=['POST'])
@@ -77,6 +88,9 @@ def mcp_gateway():
             result = handle_action(action, parameters)
         elif tool_name == "puppeteer":
             from tools.puppeteer_tool import handle_action
+            result = handle_action(action, parameters)
+        elif tool_name == "tiered_memory":
+            from tiered_memory.mcp_interface import handle_action
             result = handle_action(action, parameters)
         else:
             return jsonify({"error": f"Unknown tool: {tool_name}"}), 404
@@ -436,6 +450,275 @@ def mcp_manifest():
                             "description": "Extracted content"
                         }
                     }
+                }
+            },
+            "tiered_memory": {
+                "description": "Tiered memory system with T0-T4 storage, promotion/demotion, versioning, and hybrid search",
+                "actions": {
+                    "search": {
+                        "description": "Hybrid search across memory tiers (T0-T3)",
+                        "parameters": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search query (natural language)",
+                                "required": True
+                            },
+                            "scope": {
+                                "type": "object",
+                                "description": "Filter scope (e.g., {source_type: 'github'})"
+                            },
+                            "domain_tags": {
+                                "type": "array",
+                                "description": "Filter by domain tags (e.g., ['finance', 'code'])"
+                            },
+                            "time_range": {
+                                "type": "object",
+                                "description": "{start: ISO, end: ISO} time range filter"
+                            },
+                            "k": {
+                                "type": "number",
+                                "description": "Number of results",
+                                "default": 10
+                            },
+                            "budget_ms": {
+                                "type": "number",
+                                "description": "Time budget in milliseconds",
+                                "default": 500
+                            },
+                            "session_id": {
+                                "type": "string",
+                                "description": "Session ID for T0 access"
+                            }
+                        },
+                        "returns": {
+                            "type": "object",
+                            "description": "Search results with context pack references"
+                        }
+                    },
+                    "get": {
+                        "description": "Retrieve a memory object by ID",
+                        "parameters": {
+                            "object_id": {
+                                "type": "string",
+                                "description": "Memory object ID",
+                                "required": True
+                            },
+                            "view": {
+                                "type": "string",
+                                "description": "View type: snippet, summary, or raw",
+                                "default": "summary"
+                            },
+                            "session_id": {
+                                "type": "string",
+                                "description": "Session ID for T0 access"
+                            }
+                        },
+                        "returns": {
+                            "type": "object",
+                            "description": "Memory object"
+                        }
+                    },
+                    "write_event": {
+                        "description": "Write an event (episodic/procedural) to memory",
+                        "parameters": {
+                            "event_type": {
+                                "type": "string",
+                                "description": "Event type (tool_call, correction, preference)",
+                                "required": True
+                            },
+                            "payload": {
+                                "type": "any",
+                                "description": "Event content",
+                                "required": True
+                            },
+                            "metadata": {
+                                "type": "object",
+                                "description": "Additional metadata (object_type, domain_tags, trust_level)"
+                            },
+                            "session_id": {
+                                "type": "string",
+                                "description": "Session ID"
+                            }
+                        },
+                        "returns": {
+                            "type": "object",
+                            "description": "Created event with ID and tier"
+                        }
+                    },
+                    "pin": {
+                        "description": "Pin an object to a specific tier (prevent demotion)",
+                        "parameters": {
+                            "object_id": {
+                                "type": "string",
+                                "description": "Object ID to pin",
+                                "required": True
+                            },
+                            "tier_target": {
+                                "type": "string",
+                                "description": "Target tier (t1 or t2)",
+                                "default": "t1"
+                            }
+                        },
+                        "returns": {
+                            "type": "object",
+                            "description": "Pin status"
+                        }
+                    },
+                    "unpin": {
+                        "description": "Remove pin from an object",
+                        "parameters": {
+                            "object_id": {
+                                "type": "string",
+                                "description": "Object ID to unpin",
+                                "required": True
+                            }
+                        },
+                        "returns": {
+                            "type": "object",
+                            "description": "Unpin status"
+                        }
+                    },
+                    "context_pack": {
+                        "description": "Assemble a token-budgeted context pack",
+                        "parameters": {
+                            "query": {
+                                "type": "string",
+                                "description": "Query to build context for",
+                                "required": True
+                            },
+                            "scope": {
+                                "type": "object",
+                                "description": "Scope filters"
+                            },
+                            "token_budget": {
+                                "type": "number",
+                                "description": "Maximum tokens",
+                                "default": 4000
+                            },
+                            "session_id": {
+                                "type": "string",
+                                "description": "Session ID"
+                            }
+                        },
+                        "returns": {
+                            "type": "object",
+                            "description": "Context pack with summary, snippets, facts, validity notes"
+                        }
+                    },
+                    "version": {
+                        "description": "Create a new version of an object (don't overwrite)",
+                        "parameters": {
+                            "object_id": {
+                                "type": "string",
+                                "description": "Object to version",
+                                "required": True
+                            },
+                            "new_content": {
+                                "type": "string",
+                                "description": "New content",
+                                "required": True
+                            },
+                            "metadata": {
+                                "type": "object",
+                                "description": "Additional metadata"
+                            },
+                            "change_reason": {
+                                "type": "string",
+                                "description": "Why the change was made"
+                            }
+                        },
+                        "returns": {
+                            "type": "object",
+                            "description": "Version info with old/new IDs"
+                        }
+                    },
+                    "get_versions": {
+                        "description": "Get version history for an object",
+                        "parameters": {
+                            "object_id": {
+                                "type": "string",
+                                "description": "Object ID",
+                                "required": True
+                            },
+                            "include_content": {
+                                "type": "boolean",
+                                "description": "Include content in response",
+                                "default": False
+                            }
+                        },
+                        "returns": {
+                            "type": "object",
+                            "description": "Version history"
+                        }
+                    },
+                    "resolve_conflict": {
+                        "description": "Resolve conflicts between versions",
+                        "parameters": {
+                            "object_ids": {
+                                "type": "array",
+                                "description": "List of conflicting object IDs",
+                                "required": True
+                            },
+                            "resolution": {
+                                "type": "string",
+                                "description": "Strategy: latest_valid, highest_trust, merge, manual",
+                                "default": "latest_valid"
+                            }
+                        },
+                        "returns": {
+                            "type": "object",
+                            "description": "Resolved object or candidates"
+                        }
+                    },
+                    "export_training_batch": {
+                        "description": "Export data for continual learning",
+                        "parameters": {
+                            "criteria": {
+                                "type": "object",
+                                "description": "Export criteria (batch_type, time_range, domain_tags)",
+                                "required": True
+                            }
+                        },
+                        "returns": {
+                            "type": "object",
+                            "description": "Training batch manifest"
+                        }
+                    },
+                    "stats": {
+                        "description": "Get memory system statistics",
+                        "parameters": {},
+                        "returns": {
+                            "type": "object",
+                            "description": "Stats for all tiers"
+                        }
+                    },
+                    "maintenance": {
+                        "description": "Run maintenance tasks (promotion/demotion)",
+                        "parameters": {},
+                        "returns": {
+                            "type": "object",
+                            "description": "Maintenance results"
+                        }
+                    }
+                },
+                "resources": {
+                    "context_pack": {
+                        "uri": "memory://context_pack/{request_id}",
+                        "description": "Cached context pack"
+                    },
+                    "schema": {
+                        "uri": "memory://schema/{project}",
+                        "description": "Project-specific retrieval schema"
+                    },
+                    "object": {
+                        "uri": "memory://object/{object_id}",
+                        "description": "Memory object by ID"
+                    }
+                },
+                "prompts": {
+                    "memory_usage_finance": "Safe memory usage for finance domain",
+                    "memory_usage_engineering": "Safe memory usage for engineering domain",
+                    "memory_usage_code": "Safe memory usage for code context"
                 }
             }
         }
