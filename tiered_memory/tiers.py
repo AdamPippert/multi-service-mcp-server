@@ -4,14 +4,14 @@ Tier Storage Backends for Tiered Memory System
 
 Tier Architecture:
 - T0: In-context (SessionCache, in-memory)
-- T1: Hot cache (Redis or in-memory fallback, TTL-heavy)
+- T1: Hot cache (Valkey or in-memory fallback, TTL-heavy)
 - T2: Warm index (Postgres + pgvector, or SQLite for dev)
 - T3: Cold lake (S3/MinIO or filesystem fallback)
 - T4: Audit log (Append-only, immutable)
 
 Configuration Profiles:
 - Profile S: Single machine (in-memory/SQLite/filesystem)
-- Profile C: Small cluster (Redis/Postgres/MinIO)
+- Profile C: Small cluster (Valkey/Postgres/MinIO)
 - Profile E: Enterprise (WORM storage, full RBAC)
 """
 
@@ -144,25 +144,25 @@ class InMemoryBackend(TierBackend):
             }
 
 
-class RedisBackend(TierBackend):
+class ValkeyBackend(TierBackend):
     """
-    Redis storage backend for T1 in Profile C/E.
-    Requires redis-py package.
+    Valkey storage backend for T1 in Profile C/E.
+    Uses redis-py package (Valkey is Redis-compatible).
     """
 
-    def __init__(self, redis_url: str = "redis://localhost:6379/0",
+    def __init__(self, valkey_url: str = "redis://localhost:6379/0",
                  prefix: str = "tmem:", default_ttl: int = 3600):
         self.prefix = prefix
         self.default_ttl = default_ttl
         self._client = None
-        self._redis_url = redis_url
+        self._valkey_url = valkey_url
 
     @property
     def client(self):
         if self._client is None:
             try:
-                import redis
-                self._client = redis.from_url(self._redis_url, decode_responses=False)
+                import redis  # redis-py is compatible with Valkey
+                self._client = redis.from_url(self._valkey_url, decode_responses=False)
             except ImportError:
                 logger.warning("redis package not installed, falling back to in-memory")
                 return None
@@ -214,10 +214,10 @@ class RedisBackend(TierBackend):
 
     def stats(self) -> Dict:
         if not self.client:
-            return {'backend': 'redis', 'status': 'disconnected'}
+            return {'backend': 'valkey', 'status': 'disconnected'}
         info = self.client.info('memory')
         return {
-            'backend': 'redis',
+            'backend': 'valkey',
             'used_memory': info.get('used_memory_human'),
             'connected_clients': info.get('connected_clients'),
         }
@@ -947,8 +947,8 @@ class TierManager:
 
         elif self.profile == "C":
             # Cluster profile
-            self._backends['t1'] = RedisBackend(
-                redis_url=self.config.get('redis_url', 'redis://localhost:6379/0'),
+            self._backends['t1'] = ValkeyBackend(
+                valkey_url=self.config.get('valkey_url', 'redis://localhost:6379/0'),
                 default_ttl=self.config.get('t1_ttl', 3600)
             )
             self._backends['t2'] = PostgresVectorBackend(
@@ -967,8 +967,8 @@ class TierManager:
 
         elif self.profile == "E":
             # Enterprise profile
-            self._backends['t1'] = RedisBackend(
-                redis_url=self.config.get('redis_url', 'redis://localhost:6379/0'),
+            self._backends['t1'] = ValkeyBackend(
+                valkey_url=self.config.get('valkey_url', 'redis://localhost:6379/0'),
                 default_ttl=self.config.get('t1_ttl', 3600)
             )
             self._backends['t2'] = PostgresVectorBackend(

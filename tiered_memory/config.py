@@ -4,7 +4,7 @@ Configuration Profiles for Tiered Memory System
 
 Profiles:
 - Profile S: Single machine lab (in-memory, SQLite, filesystem)
-- Profile C: Small cluster (Redis, Postgres, S3/MinIO)
+- Profile C: Small cluster (Valkey, Postgres, S3/MinIO)
 - Profile E: Enterprise (WORM storage, RBAC, full audit)
 
 Each profile defines:
@@ -91,7 +91,7 @@ class MemoryProfile:
             # T1 config
             't1_max_items': self.t1.max_items,
             't1_ttl': self.t1.default_ttl,
-            'redis_url': self.t1.connection_string,
+            'valkey_url': self.t1.connection_string,
 
             # T2 config
             't2_db_path': self.t2.connection_string or 'data/memory_t2.db',
@@ -190,7 +190,7 @@ def get_profile_s(base_path: str = "data") -> MemoryProfile:
 
 
 def get_profile_c(
-    redis_url: str = "redis://localhost:6379/0",
+    valkey_url: str = "redis://localhost:6379/0",
     postgres_url: str = "postgresql://localhost/memory",
     s3_bucket: str = "memory-lake",
     s3_endpoint: Optional[str] = None,  # MinIO endpoint
@@ -200,7 +200,7 @@ def get_profile_c(
     Profile C: Small cluster environment.
 
     - T0: In-process session cache
-    - T1: Redis cluster with TTL
+    - T1: Valkey cluster with TTL
     - T2: PostgreSQL + pgvector + full-text search
     - T3: S3/MinIO object storage
     - T4: Append-only audit logs
@@ -218,10 +218,10 @@ def get_profile_c(
         ),
 
         t1=TierConfig(
-            backend="redis",
+            backend="valkey",
             max_items=50000,
             default_ttl=3600,
-            connection_string=redis_url
+            connection_string=valkey_url
         ),
 
         t2=TierConfig(
@@ -270,7 +270,7 @@ def get_profile_c(
 
 
 def get_profile_e(
-    redis_url: str = "redis://localhost:6379/0",
+    valkey_url: str = "redis://localhost:6379/0",
     postgres_url: str = "postgresql://localhost/memory",
     s3_bucket: str = "memory-lake",
     s3_endpoint: Optional[str] = None,
@@ -280,7 +280,7 @@ def get_profile_e(
     Profile E: Enterprise environment.
 
     - T0: In-process session cache
-    - T1: Redis cluster with TTL
+    - T1: Valkey cluster with TTL
     - T2: PostgreSQL + pgvector with connection pooling
     - T3: S3 with versioning enabled
     - T4: WORM-compliant audit logs with hash chain
@@ -298,10 +298,10 @@ def get_profile_e(
         ),
 
         t1=TierConfig(
-            backend="redis",
+            backend="valkey",
             max_items=100000,
             default_ttl=7200,  # 2 hours
-            connection_string=redis_url
+            connection_string=valkey_url
         ),
 
         t2=TierConfig(
@@ -391,7 +391,7 @@ def get_profile_from_env() -> MemoryProfile:
     Environment variables:
     - MEMORY_PROFILE: Profile name (S, C, E)
     - MEMORY_BASE_PATH: Base path for local storage
-    - MEMORY_REDIS_URL: Redis connection URL
+    - MEMORY_VALKEY_URL: Valkey connection URL (falls back to MEMORY_REDIS_URL)
     - MEMORY_POSTGRES_URL: PostgreSQL connection URL
     - MEMORY_S3_BUCKET: S3 bucket name
     - MEMORY_S3_ENDPOINT: S3/MinIO endpoint URL
@@ -403,8 +403,9 @@ def get_profile_from_env() -> MemoryProfile:
     kwargs = {'base_path': base_path}
 
     if profile_name.upper() in ('C', 'E'):
-        kwargs['redis_url'] = os.environ.get(
-            'MEMORY_REDIS_URL', 'redis://localhost:6379/0'
+        kwargs['valkey_url'] = os.environ.get(
+            'MEMORY_VALKEY_URL',
+            os.environ.get('MEMORY_REDIS_URL', 'redis://localhost:6379/0')
         )
         kwargs['postgres_url'] = os.environ.get(
             'MEMORY_POSTGRES_URL', 'postgresql://localhost/memory'
