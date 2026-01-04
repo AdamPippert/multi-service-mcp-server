@@ -55,7 +55,7 @@ def get_engine():
             't2_db_path': current_app.config.get('MEMORY_T2_DB_PATH', 'data/memory_t2.db'),
             't3_path': current_app.config.get('MEMORY_T3_PATH', 'data/t3'),
             't4_path': current_app.config.get('MEMORY_T4_PATH', 'data/audit'),
-            'redis_url': current_app.config.get('REDIS_URL'),
+            'valkey_url': current_app.config.get('VALKEY_URL'),
             'postgres_url': current_app.config.get('MEMORY_POSTGRES_URL'),
             's3_bucket': current_app.config.get('MEMORY_S3_BUCKET'),
             's3_endpoint': current_app.config.get('MEMORY_S3_ENDPOINT'),

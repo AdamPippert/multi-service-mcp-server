@@ -41,8 +41,8 @@ class Config:
     MEMORY_T1_MAX_ITEMS = int(os.environ.get('MEMORY_T1_MAX_ITEMS', '10000'))
     MEMORY_T1_TTL = int(os.environ.get('MEMORY_T1_TTL', '3600'))  # seconds
 
-    # Redis Configuration (Profile C/E)
-    REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+    # Valkey Configuration (Profile C/E) - Redis-compatible
+    VALKEY_URL = os.environ.get('VALKEY_URL', os.environ.get('REDIS_URL', 'redis://localhost:6379/0'))
 
     # T2 Warm Index Configuration
     MEMORY_T2_DB_PATH = os.environ.get('MEMORY_T2_DB_PATH', 'data/memory_t2.db')
