@@ -1,0 +1,58 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill",
+      "Bash(python:*)",
+      "Bash(pip:*)",
+      "Bash(npm:*)",
+      "Bash(node:*)",
+      "Bash(pytest:*)",
+      "Bash(curl http://localhost:*)",
+      "Bash(git:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)"
+    ]
+  },
+  "env": {
+    "FLASK_APP": "app.py",
+    "FLASK_ENV": "development",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PUPPETEER_HEADLESS": "true"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/session-start.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/session-start.sh --resume"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "prose@openprose": true
+  },
+  "extraKnownMarketplaces": {
+    "openprose": {
+      "source": {
+        "source": "github",
+        "repo": "openprose/prose"
+      }
+    }
+  }
+}
