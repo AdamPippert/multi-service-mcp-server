@@ -21,10 +21,14 @@
 # └── templates/
 
 # app.py
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import json
 import os
+import uuid
+import time
+from datetime import datetime, timezone
+from functools import wraps
 from config import Config
 from tools.github_tool import github_routes
 from tools.gitlab_tool import gitlab_routes
@@ -32,6 +36,105 @@ from tools.gmaps_tool import gmaps_routes
 from tools.memory_tool import memory_routes
 from tools.puppeteer_tool import puppeteer_routes
 from tiered_memory.mcp_interface import tiered_memory_routes
+
+# =============================================================================
+# MCP 2026-07-28 Stateless Protocol Support
+# =============================================================================
+
+# Protocol constants
+MCP_PROTOCOL_VERSION = Config.MCP_PROTOCOL_VERSION
+MCP_SUPPORTED_VERSIONS = Config.MCP_SUPPORTED_VERSIONS
+
+# JSON-RPC 2.0 error codes
+JSONRPC_PARSE_ERROR = -32700
+JSONRPC_INVALID_REQUEST = -32600
+JSONRPC_METHOD_NOT_FOUND = -32601
+JSONRPC_INVALID_PARAMS = -32602
+JSONRPC_INTERNAL_ERROR = -32603
+MCP_UNSUPPORTED_PROTOCOL = -32001
+MCP_TOOL_NOT_FOUND = -32002
+MCP_ACTION_NOT_FOUND = -32003
+
+
+def get_server_info():
+    """Returns server info for _meta responses"""
+    return {
+        "name": Config.MCP_SERVER_NAME,
+        "version": Config.MCP_SERVER_VERSION,
+        "protocolVersion": MCP_PROTOCOL_VERSION
+    }
+
+
+def parse_request_meta(data):
+    """Parse _meta from request, return defaults if missing"""
+    meta = data.get('_meta', {})
+    return {
+        'progressToken': meta.get('progressToken'),
+        'requestId': meta.get('requestId', str(uuid.uuid4())),
+        'clientInfo': meta.get('clientInfo', {})
+    }
+
+
+def validate_mcp_headers(headers):
+    """Validate MCP protocol headers"""
+    protocol_version = headers.get('MCP-Protocol-Version')
+    if protocol_version and protocol_version not in MCP_SUPPORTED_VERSIONS:
+        return False, f"Unsupported protocol version: {protocol_version}"
+    return True, None
+
+
+def mcp_response(result, request_id=None, cache_ttl_ms=None, cache_scope=None):
+    """Create a JSON-RPC 2.0 MCP response"""
+    response = {
+        "jsonrpc": "2.0",
+        "result": result
+    }
+    if request_id:
+        response["id"] = request_id
+
+    # Add _meta for caching hints
+    meta = {"serverInfo": get_server_info()}
+    if cache_ttl_ms is not None:
+        meta["cache"] = {
+            "ttlMs": cache_ttl_ms,
+            "scope": cache_scope or Config.MCP_DEFAULT_CACHE_SCOPE
+        }
+    response["result"]["_meta"] = meta
+
+    return response
+
+
+def mcp_error_response(code, message, request_id=None, data=None):
+    """Create a JSON-RPC 2.0 error response"""
+    response = {
+        "jsonrpc": "2.0",
+        "error": {
+            "code": code,
+            "message": message
+        }
+    }
+    if request_id:
+        response["id"] = request_id
+    if data:
+        response["error"]["data"] = data
+    return response
+
+
+def mcp_endpoint(f):
+    """Decorator to handle MCP protocol validation and response formatting"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Validate headers
+        valid, error = validate_mcp_headers(request.headers)
+        if not valid:
+            return jsonify(mcp_error_response(
+                MCP_UNSUPPORTED_PROTOCOL,
+                error,
+                request_id=None
+            )), 400
+
+        return f(*args, **kwargs)
+    return decorated_function
 
 app = Flask(__name__)
 CORS(app)
@@ -47,33 +150,93 @@ app.register_blueprint(puppeteer_routes, url_prefix='/tool/puppeteer')
 # Register tiered memory routes
 app.register_blueprint(tiered_memory_routes, url_prefix='/tool/tiered_memory')
 
-# MCP Gateway endpoint
+# MCP Gateway endpoint - JSON-RPC 2.0 format (MCP 2026-07-28)
 @app.route('/mcp/gateway', methods=['POST'])
+@mcp_endpoint
 def mcp_gateway():
+    """
+    Main MCP gateway supporting JSON-RPC 2.0 format.
+
+    Request format:
+    {
+        "jsonrpc": "2.0",
+        "id": "request-123",
+        "method": "tools/call",
+        "params": {
+            "name": "github.listRepos",
+            "arguments": {"username": "octocat"},
+            "_meta": {"progressToken": "..."}
+        }
+    }
+    """
     data = request.get_json()
-    
+
     if not data:
-        return jsonify({"error": "Request body is required"}), 400
-    
-    # Parse the MCP request
-    tool_name = data.get('tool')
-    action = data.get('action')
-    parameters = data.get('parameters', {})
-    
-    # Check for required fields
-    if not tool_name:
-        return jsonify({"error": "Tool name is required"}), 400
-    if not action:
-        return jsonify({"error": "Action is required"}), 400
-    
-    # Route to the appropriate tool
+        return jsonify(mcp_error_response(
+            JSONRPC_PARSE_ERROR,
+            "Request body is required"
+        )), 400
+
+    # Parse JSON-RPC 2.0 fields
+    jsonrpc = data.get('jsonrpc')
+    request_id = data.get('id')
+    method = data.get('method')
+    params = data.get('params', {})
+
+    # Validate JSON-RPC version
+    if jsonrpc != '2.0':
+        return jsonify(mcp_error_response(
+            JSONRPC_INVALID_REQUEST,
+            "JSON-RPC version must be 2.0",
+            request_id
+        )), 400
+
+    # Handle method routing
+    if method == 'tools/call':
+        return handle_tools_call(params, request_id)
+    elif method == 'tools/list':
+        return handle_tools_list(params, request_id)
+    elif method == 'initialize':
+        return handle_initialize(params, request_id)
+    elif method == 'ping':
+        return handle_ping(request_id)
+    else:
+        # Legacy format support: tool + action
+        tool_name = data.get('tool') or params.get('tool')
+        action = data.get('action') or params.get('action')
+        parameters = data.get('parameters') or params.get('arguments', {})
+
+        if tool_name and action:
+            return handle_legacy_call(tool_name, action, parameters, request_id)
+
+        return jsonify(mcp_error_response(
+            JSONRPC_METHOD_NOT_FOUND,
+            f"Method not found: {method}",
+            request_id
+        )), 404
+
+
+def handle_tools_call(params, request_id):
+    """Handle tools/call method"""
+    name = params.get('name', '')
+    arguments = params.get('arguments', {})
+
+    # Parse tool.action format
+    if '.' in name:
+        tool_name, action = name.split('.', 1)
+    else:
+        return jsonify(mcp_error_response(
+            JSONRPC_INVALID_PARAMS,
+            "Tool name must be in format 'tool.action'",
+            request_id
+        )), 400
+
+    return handle_legacy_call(tool_name, action, arguments, request_id)
+
+
+def handle_legacy_call(tool_name, action, parameters, request_id):
+    """Handle legacy tool calls and route to appropriate handler"""
     try:
-        # Construct the tool endpoint URL
-        tool_url = f"/tool/{tool_name}/{action}"
-        
-        # Forward the request to the tool handler
-        # In a real implementation, you'd use Flask's test_client or requests library
-        # But for this demo, we'll simulate the routing
         if tool_name == "github":
             from tools.github_tool import handle_action
             result = handle_action(action, parameters)
@@ -93,31 +256,376 @@ def mcp_gateway():
             from tiered_memory.mcp_interface import handle_action
             result = handle_action(action, parameters)
         else:
-            return jsonify({"error": f"Unknown tool: {tool_name}"}), 404
-        
-        # Format the response according to MCP
-        mcp_response = {
-            "tool": tool_name,
-            "action": action,
-            "status": "success",
-            "result": result
-        }
-        
-        return jsonify(mcp_response)
-    
+            return jsonify(mcp_error_response(
+                MCP_TOOL_NOT_FOUND,
+                f"Unknown tool: {tool_name}",
+                request_id
+            )), 404
+
+        return jsonify(mcp_response(
+            {
+                "content": [
+                    {"type": "text", "text": json.dumps(result)}
+                ],
+                "isError": False
+            },
+            request_id
+        ))
+
     except Exception as e:
-        # Handle errors according to MCP
-        mcp_error = {
-            "tool": tool_name,
-            "action": action,
-            "status": "error",
-            "error": {
-                "type": type(e).__name__,
-                "message": str(e)
+        return jsonify(mcp_error_response(
+            JSONRPC_INTERNAL_ERROR,
+            str(e),
+            request_id,
+            {"type": type(e).__name__}
+        )), 500
+
+
+def handle_tools_list(params, request_id):
+    """Handle tools/list method"""
+    tools = get_tools_list()
+    return jsonify(mcp_response(
+        {"tools": tools},
+        request_id,
+        cache_ttl_ms=Config.MCP_DEFAULT_TTL_MS,
+        cache_scope="public"
+    ))
+
+
+def handle_initialize(params, request_id):
+    """Handle initialize method for protocol negotiation"""
+    client_info = params.get('clientInfo', {})
+    protocol_version = params.get('protocolVersion', MCP_PROTOCOL_VERSION)
+
+    # Negotiate protocol version
+    if protocol_version not in MCP_SUPPORTED_VERSIONS:
+        protocol_version = MCP_PROTOCOL_VERSION
+
+    return jsonify(mcp_response(
+        {
+            "protocolVersion": protocol_version,
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"subscribe": False, "listChanged": False},
+                "prompts": {"listChanged": False}
+            },
+            "serverInfo": get_server_info()
+        },
+        request_id
+    ))
+
+
+def handle_ping(request_id):
+    """Handle ping method"""
+    return jsonify(mcp_response({}, request_id))
+
+
+def get_tools_list():
+    """Returns list of tools in MCP 2026-07-28 format"""
+    return [
+        {
+            "name": "github.listRepos",
+            "description": "List repositories for a user or organization",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "username": {"type": "string", "description": "GitHub username or organization name"}
+                },
+                "required": ["username"]
+            }
+        },
+        {
+            "name": "github.getRepo",
+            "description": "Get details for a specific repository",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string", "description": "Repository owner"},
+                    "repo": {"type": "string", "description": "Repository name"}
+                },
+                "required": ["owner", "repo"]
+            }
+        },
+        {
+            "name": "github.searchRepos",
+            "description": "Search for repositories",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"}
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "github.getIssues",
+            "description": "Get issues for a repository",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string", "description": "Repository owner"},
+                    "repo": {"type": "string", "description": "Repository name"},
+                    "state": {"type": "string", "description": "Issue state (open, closed, all)", "default": "open"}
+                },
+                "required": ["owner", "repo"]
+            }
+        },
+        {
+            "name": "github.createIssue",
+            "description": "Create a new issue in a repository",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string", "description": "Repository owner"},
+                    "repo": {"type": "string", "description": "Repository name"},
+                    "title": {"type": "string", "description": "Issue title"},
+                    "body": {"type": "string", "description": "Issue body"}
+                },
+                "required": ["owner", "repo", "title"]
+            }
+        },
+        {
+            "name": "gitlab.listProjects",
+            "description": "List all projects accessible by the authenticated user",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "gitlab.getProject",
+            "description": "Get details for a specific project",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "projectId": {"type": "string", "description": "GitLab project ID"}
+                },
+                "required": ["projectId"]
+            }
+        },
+        {
+            "name": "gitlab.searchProjects",
+            "description": "Search for projects on GitLab",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"}
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "gmaps.geocode",
+            "description": "Convert an address to geographic coordinates",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "Address to geocode"}
+                },
+                "required": ["address"]
+            }
+        },
+        {
+            "name": "gmaps.reverseGeocode",
+            "description": "Convert geographic coordinates to an address",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "lat": {"type": "number", "description": "Latitude"},
+                    "lng": {"type": "number", "description": "Longitude"}
+                },
+                "required": ["lat", "lng"]
+            }
+        },
+        {
+            "name": "gmaps.getDirections",
+            "description": "Get directions between two locations",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "origin": {"type": "string", "description": "Origin address or coordinates"},
+                    "destination": {"type": "string", "description": "Destination address or coordinates"},
+                    "mode": {"type": "string", "description": "Travel mode (driving, walking, bicycling, transit)"}
+                },
+                "required": ["origin", "destination"]
+            }
+        },
+        {
+            "name": "tiered_memory.recall",
+            "description": "Query memory across all tiers",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural language query or embedding vector"},
+                    "scope": {"type": "object", "description": "Scope filters"},
+                    "limit": {"type": "number", "description": "Maximum results", "default": 10}
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "tiered_memory.read",
+            "description": "Read a specific memory object by ID",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object_id": {"type": "string", "description": "Memory object ID"},
+                    "view": {"type": "string", "description": "View type: snippet, summary, or raw", "default": "summary"}
+                },
+                "required": ["object_id"]
+            }
+        },
+        {
+            "name": "tiered_memory.write_event",
+            "description": "Write an event (episodic/procedural) to memory",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "event_type": {"type": "string", "description": "Event type (tool_call, correction, preference)"},
+                    "payload": {"description": "Event content"},
+                    "metadata": {"type": "object", "description": "Additional metadata"}
+                },
+                "required": ["event_type", "payload"]
+            }
+        },
+        {
+            "name": "tiered_memory.context_pack",
+            "description": "Assemble a token-budgeted context pack",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Query to build context for"},
+                    "token_budget": {"type": "number", "description": "Maximum tokens", "default": 4000}
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "tiered_memory.stats",
+            "description": "Get memory system statistics",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "puppeteer.navigate",
+            "description": "Navigate to a URL",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to navigate to"}
+                },
+                "required": ["url"]
+            }
+        },
+        {
+            "name": "puppeteer.screenshot",
+            "description": "Take a screenshot of the current page",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "fullPage": {"type": "boolean", "description": "Capture full page", "default": False}
+                }
+            }
+        },
+        {
+            "name": "puppeteer.click",
+            "description": "Click on an element",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "CSS selector for the element"}
+                },
+                "required": ["selector"]
+            }
+        },
+        {
+            "name": "puppeteer.type",
+            "description": "Type text into an input field",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "CSS selector for the input"},
+                    "text": {"type": "string", "description": "Text to type"}
+                },
+                "required": ["selector", "text"]
             }
         }
-        
-        return jsonify(mcp_error), 500
+    ]
+
+
+# =============================================================================
+# MCP Discovery Endpoints (MCP 2026-07-28)
+# =============================================================================
+
+@app.route('/mcp/discover', methods=['GET'])
+@app.route('/server/discover', methods=['GET'])
+@mcp_endpoint
+def mcp_discover():
+    """Server discovery endpoint for MCP 2026-07-28"""
+    return jsonify({
+        "jsonrpc": "2.0",
+        "result": {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "supportedVersions": MCP_SUPPORTED_VERSIONS,
+            "serverInfo": get_server_info(),
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"subscribe": False, "listChanged": False},
+                "prompts": {"listChanged": False}
+            },
+            "endpoints": {
+                "gateway": "/mcp/gateway",
+                "tools": "/mcp/tools/list",
+                "manifest": "/mcp/manifest",
+                "health": "/health"
+            },
+            "_meta": {
+                "serverInfo": get_server_info(),
+                "cache": {
+                    "ttlMs": Config.MCP_DEFAULT_TTL_MS,
+                    "scope": "public"
+                }
+            }
+        }
+    })
+
+
+@app.route('/mcp/tools/list', methods=['GET', 'POST'])
+@mcp_endpoint
+def mcp_tools_list():
+    """List available tools in MCP 2026-07-28 format"""
+    request_id = None
+    if request.method == 'POST':
+        data = request.get_json() or {}
+        request_id = data.get('id')
+
+    tools = get_tools_list()
+    return jsonify(mcp_response(
+        {"tools": tools},
+        request_id,
+        cache_ttl_ms=Config.MCP_DEFAULT_TTL_MS,
+        cache_scope="public"
+    ))
+
+
+@app.route('/mcp/protocol/negotiate', methods=['POST'])
+@mcp_endpoint
+def mcp_negotiate():
+    """Protocol version negotiation endpoint"""
+    data = request.get_json() or {}
+    request_id = data.get('id')
+    requested_version = data.get('params', {}).get('protocolVersion', MCP_PROTOCOL_VERSION)
+
+    if requested_version in MCP_SUPPORTED_VERSIONS:
+        negotiated_version = requested_version
+    else:
+        negotiated_version = MCP_PROTOCOL_VERSION
+
+    return jsonify(mcp_response(
+        {
+            "protocolVersion": negotiated_version,
+            "supportedVersions": MCP_SUPPORTED_VERSIONS,
+            "serverInfo": get_server_info()
+        },
+        request_id
+    ))
+
 
 # MCP manifest endpoint
 @app.route('/mcp/manifest', methods=['GET'])
@@ -726,10 +1234,32 @@ def mcp_manifest():
     
     return jsonify(manifest)
 
+
+# =============================================================================
+# Response Middleware for MCP Headers
+# =============================================================================
+
+@app.after_request
+def add_mcp_headers(response):
+    """Add MCP protocol headers to responses"""
+    if request.path.startswith('/mcp/'):
+        response.headers['MCP-Protocol-Version'] = MCP_PROTOCOL_VERSION
+        response.headers['MCP-Server-Name'] = Config.MCP_SERVER_NAME
+        response.headers['MCP-Server-Version'] = Config.MCP_SERVER_VERSION
+    return response
+
+
 # Health check endpoint
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'ok'})
+    return jsonify({
+        'status': 'ok',
+        'mcp': {
+            'protocolVersion': MCP_PROTOCOL_VERSION,
+            'serverName': Config.MCP_SERVER_NAME,
+            'serverVersion': Config.MCP_SERVER_VERSION
+        }
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=Config.DEBUG)

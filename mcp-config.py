@@ -62,3 +62,28 @@ class Config:
     MEMORY_HEAT_T2_T1 = float(os.environ.get('MEMORY_HEAT_T2_T1', '20.0'))
     MEMORY_DEMOTION_HOURS_T1_T2 = int(os.environ.get('MEMORY_DEMOTION_HOURS_T1_T2', '24'))
     MEMORY_DEMOTION_DAYS_T2_T3 = int(os.environ.get('MEMORY_DEMOTION_DAYS_T2_T3', '7'))
+
+    # =========================================================================
+    # TLDR Code Analysis Configuration
+    # =========================================================================
+
+    # Default project path for TLDR analysis (if not specified in request)
+    TLDR_PROJECT_PATH = os.environ.get('TLDR_PROJECT_PATH', os.getcwd())
+
+    # =========================================================================
+    # MCP 2026-07-28 Stateless Protocol Configuration
+    # =========================================================================
+
+    # Protocol version
+    MCP_PROTOCOL_VERSION = '2026-07-28'
+    MCP_SUPPORTED_VERSIONS = ['2026-07-28', '2025-11-25', '2024-11-05']
+
+    # Server info for _meta responses
+    MCP_SERVER_NAME = os.environ.get('MCP_SERVER_NAME', 'multi-service-mcp-server')
+    MCP_SERVER_VERSION = os.environ.get('MCP_SERVER_VERSION', '2.0.0')
+
+    # Default TTL for list responses (milliseconds)
+    MCP_DEFAULT_TTL_MS = int(os.environ.get('MCP_DEFAULT_TTL_MS', '60000'))  # 60 seconds
+
+    # Default cache scope: 'public' or 'private'
+    MCP_DEFAULT_CACHE_SCOPE = os.environ.get('MCP_DEFAULT_CACHE_SCOPE', 'private')
